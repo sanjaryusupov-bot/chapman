@@ -3,14 +3,12 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import pandas as pd
 from datetime import datetime
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
-import av
-from pyzbar import pyzbar
+from PIL import Image
+from pyzbar.pyzbar import decode
 
-# --- CONFIG ---
 st.set_page_config(layout="wide")
 
-# --- GOOGLE SHEETS ---
+# --- GOOGLE ---
 creds_dict = st.secrets["gcp_service_account"]
 
 scope = [
@@ -25,18 +23,14 @@ sheet = client.open_by_url(
     "https://docs.google.com/spreadsheets/d/1soHrN7Iqd3jk9iLGdUGK9APxVfRBwWXHxoI8x2Hsh1o"
 ).worksheet("Отгрузка")
 
-data = sheet.get_all_records()
-df = pd.DataFrame(data)
+df = pd.DataFrame(sheet.get_all_records())
 
-st.title("🚚 Система отгрузки (WMS Lite)")
+st.title("🚚 Отгрузка (камера)")
 
-# --- ВЫБОР ВОДИТЕЛЯ ---
-drivers = df["Номер Машины"].dropna().unique()
-driver = st.selectbox("Выбери машину", drivers)
-
+# --- водитель ---
+driver = st.selectbox("Машина", df["Номер Машины"].dropna().unique())
 driver_df = df[df["Номер Машины"] == driver]
 
-# --- МЕТРИКИ ---
 total = len(driver_df)
 done = len(driver_df[driver_df["Статус"] == "Отгружено"])
 
@@ -45,79 +39,61 @@ col1.metric("Всего", total)
 col2.metric("Отгружено", done)
 col3.metric("Осталось", total - done)
 
-# --- ЗВУК ---
+# --- звук ---
 st.markdown("""
-<audio id="success_sound" src="https://www.soundjay.com/buttons/sounds/button-3.mp3"></audio>
+<audio id="ok" src="https://www.soundjay.com/buttons/sounds/button-3.mp3"></audio>
 <script>
-function playSound(){
-    document.getElementById("success_sound").play();
-}
+function ok(){document.getElementById("ok").play();}
 </script>
 """, unsafe_allow_html=True)
 
-# --- ФУНКЦИЯ ОБНОВЛЕНИЯ ---
-def mark_shipment(barcode):
-    global df
-
+# --- функция ---
+def mark(barcode):
     match = df[df["Номера накладных"].astype(str) == barcode]
 
     if not match.empty:
         row = match.index[0] + 2
-        current_status = sheet.acell(f"D{row}").value
+        status = sheet.acell(f"D{row}").value
 
-        if current_status == "Отгружено":
-            st.warning(f"⚠️ Уже отгружено: {barcode}")
+        if status == "Отгружено":
+            st.warning(f"⚠️ Уже: {barcode}")
         else:
             sheet.update(f"D{row}", "Отгружено")
             sheet.update(f"E{row}", f"{driver} | {datetime.now()}")
 
-            st.success(f"✅ Отгружено: {barcode}")
-            st.markdown("<script>playSound()</script>", unsafe_allow_html=True)
+            st.success(f"✅ {barcode}")
+            st.markdown("<script>ok()</script>", unsafe_allow_html=True)
     else:
-        st.error(f"❌ Не найдено: {barcode}")
+        st.error(f"❌ Нет: {barcode}")
 
-# --- РУЧНОЙ СКАН (на всякий случай) ---
-barcode_manual = st.text_input("🔎 Вставь или сканируй ШК")
+# --- камера ---
+st.subheader("📷 Сканируй")
 
-if barcode_manual:
-    mark_shipment(barcode_manual)
+img_file = st.camera_input("Наведи на штрихкод")
 
-# --- КАМЕРА ---
-st.subheader("📷 Сканирование через камеру")
+if img_file is not None:
+    image = Image.open(img_file)
+    decoded = decode(image)
 
-class BarcodeScanner(VideoTransformerBase):
-    def transform(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        barcodes = pyzbar.decode(img)
+    if decoded:
+        barcode = decoded[0].data.decode("utf-8")
+        st.write(f"Найден: {barcode}")
+        mark(barcode)
+    else:
+        st.warning("Не удалось считать")
 
-        for barcode in barcodes:
-            code = barcode.data.decode("utf-8")
-            st.session_state["last_code"] = code
-
-        return img
-
-webrtc_streamer(key="scanner", video_transformer_factory=BarcodeScanner)
-
-# --- ОБРАБОТКА СКАНА С КАМЕРЫ ---
-if "last_code" in st.session_state:
-    code = st.session_state["last_code"]
-    mark_shipment(code)
-    del st.session_state["last_code"]
-
-# --- ОСТАТКИ ---
+# --- остатки ---
 st.subheader("📦 Осталось")
-remaining = driver_df[driver_df["Статус"] != "Отгружено"]
-st.dataframe(remaining)
+st.dataframe(driver_df[driver_df["Статус"] != "Отгружено"])
 
-# --- МАРШРУТНЫЙ ЛИСТ ---
-st.subheader("🚚 Маршрутный лист")
-
+# --- маршрут ---
 if "Адрес" in df.columns:
-    route = remaining.groupby("Адрес").size().reset_index(name="Кол-во")
+    st.subheader("🚚 Маршрут")
+    route = driver_df[driver_df["Статус"] != "Отгружено"].groupby("Адрес").size().reset_index(name="Кол-во")
     st.dataframe(route)
 
-# --- ОТЧЁТ ---
-st.subheader("📊 Отчёт по водителю")
+# --- отчёт ---
+st.subheader("📊 Отчёт")
 
 report = pd.DataFrame({
     "Машина": [driver],
@@ -128,7 +104,3 @@ report = pd.DataFrame({
 })
 
 st.dataframe(report)
-
-# --- ВЫГРУЗКА ---
-csv = report.to_csv(index=False).encode("utf-8")
-st.download_button("📥 Скачать отчёт", csv, "report.csv", "text/csv")
