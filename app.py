@@ -1,34 +1,34 @@
 import streamlit as st
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 import pandas as pd
 from datetime import datetime
 from PIL import Image
 import io
-import cv2
-import numpy as np
-
-# Пытаемся импортировать pyzbar с обработкой ошибок
-try:
-    from pyzbar.pyzbar import decode
-    PYZBAR_AVAILABLE = True
-except Exception as e:
-    PYZBAR_AVAILABLE = False
-    st.warning(f"⚠️ Библиотека распознавания не загружена. Будет использован ручной ввод.")
+import base64
+import json
 
 st.set_page_config(layout="wide")
 
-# --- GOOGLE SHEETS ---
-creds_dict = st.secrets["gcp_service_account"]
+# --- ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS (ИСПРАВЛЕНО) ---
+# Получаем credentials из secrets
+creds_dict = dict(st.secrets["gcp_service_account"])
 
+# Создаем credentials правильно
 scope = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive"
 ]
 
-creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-client = gspread.authorize(creds)
+# Используем google.oauth2 вместо oauth2client
+credentials = Credentials.from_service_account_info(
+    creds_dict,
+    scopes=scope
+)
 
+client = gspread.authorize(credentials)
+
+# Открываем таблицу
 sheet = client.open_by_url(
     "https://docs.google.com/spreadsheets/d/1soHrN7Iqd3jk9iLGdUGK9APxVfRBwWXHxoI8x2Hsh1o"
 ).worksheet("Отгрузка")
@@ -37,24 +37,31 @@ df = pd.DataFrame(sheet.get_all_records())
 
 st.title("🚚 Отгрузка со сканером")
 
-# --- выбор водителя ---
-driver = st.selectbox("🚛 Выберите машину", df["Номер Машины"].dropna().unique())
-driver_df = df[df["Номер Машины"] == driver]
+# --- ВЫБОР МАШИНЫ ---
+if "Номер Машины" in df.columns:
+    driver = st.selectbox("🚛 Выберите машину", df["Номер Машины"].dropna().unique())
+    driver_df = df[df["Номер Машины"] == driver]
 
-total = len(driver_df)
-done = len(driver_df[driver_df["Статус"] == "Отгружено"])
+    total = len(driver_df)
+    done = len(driver_df[driver_df["Статус"] == "Отгружено"])
 
-col1, col2, col3 = st.columns(3)
-col1.metric("📦 Всего", total)
-col2.metric("✅ Отгружено", done)
-col3.metric("⏳ Осталось", total - done)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("📦 Всего", total)
+    col2.metric("✅ Отгружено", done)
+    col3.metric("⏳ Осталось", total - done)
+else:
+    st.error("❌ В таблице нет колонки 'Номер Машины'")
+    st.stop()
 
-# --- функция для отметки отгрузки ---
+# --- ФУНКЦИЯ ОТМЕТКИ ОТГРУЗКИ ---
 def mark_as_shipped(barcode):
-    # Очищаем штрихкод
     barcode = str(barcode).strip()
     
     # Ищем накладную
+    if "Номера накладных" not in df.columns:
+        st.error("❌ В таблице нет колонки 'Номера накладных'")
+        return False
+        
     match = df[df["Номера накладных"].astype(str).str.strip() == barcode]
     
     if not match.empty:
@@ -69,138 +76,140 @@ def mark_as_shipped(barcode):
             sheet.update(f"D{row}", "Отгружено")
             sheet.update(f"E{row}", f"{driver} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             st.success(f"✅ Накладная {barcode} отгружена!")
+            st.balloons()
             return True
     else:
         st.error(f"❌ Накладная {barcode} не найдена!")
         return False
 
-# --- СКАНИРОВАНИЕ КАМЕРОЙ ---
-st.header("📷 Сканирование штрихкода камерой")
+# --- СКАНИРОВАНИЕ КАМЕРОЙ ТЕЛЕФОНА ---
+st.header("📷 Сканирование штрихкода")
 
-# Используем HTML5 камеру через JavaScript (работает на телефонах)
+# JavaScript для захвата фото с камеры телефона
 camera_html = """
-<div style="text-align: center; padding: 20px;">
-    <video id="video" width="100%" height="auto" autoplay playsinline style="border: 2px solid #ccc; border-radius: 10px;"></video>
-    <canvas id="canvas" style="display: none;"></canvas>
+<div style="text-align: center; padding: 10px;">
+    <video id="video" width="100%" autoplay playsinline style="border: 2px solid #ddd; border-radius: 10px; max-width: 500px;"></video>
     <div style="margin-top: 10px;">
-        <button id="capture" style="padding: 10px 20px; font-size: 18px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer;">📸 Сделать фото</button>
+        <button id="capture" style="padding: 12px 24px; font-size: 18px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer;">📸 Сканировать</button>
     </div>
-    <div id="result" style="margin-top: 10px; font-size: 16px;"></div>
+    <div id="result" style="margin-top: 10px; font-size: 14px; color: #666;"></div>
 </div>
 
 <script>
 let video = document.getElementById('video');
-let canvas = document.getElementById('canvas');
 let captureBtn = document.getElementById('capture');
 let resultDiv = document.getElementById('result');
 
 // Запуск камеры
-async function startCamera() {
-    try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
+    .then(function(stream) {
         video.srcObject = stream;
-    } catch(err) {
+        resultDiv.innerHTML = '✅ Камера готова';
+        resultDiv.style.color = 'green';
+    })
+    .catch(function(err) {
         resultDiv.innerHTML = '❌ Ошибка доступа к камере: ' + err.message;
         resultDiv.style.color = 'red';
-    }
-}
+    });
 
-// Захват фото
-captureBtn.addEventListener('click', () => {
+// Функция захвата и отправки фото
+captureBtn.addEventListener('click', function() {
+    let canvas = document.createElement('canvas');
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    let ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     
-    // Конвертируем в base64
+    // Получаем base64 изображения
     let imageData = canvas.toDataURL('image/jpeg', 0.8);
     
     // Отправляем в Streamlit
     const input = document.createElement('input');
-    input.type = 'hidden';
-    input.id = 'captured_image';
+    input.type = 'text';
+    input.id = 'scanned_image';
     input.value = imageData;
     document.body.appendChild(input);
+    input.dispatchEvent(new Event('input'));
     
-    // Обновляем Streamlit
-    const event = new Event('input');
-    input.dispatchEvent(event);
-    
-    resultDiv.innerHTML = '📷 Фото сделано! Обработка...';
+    resultDiv.innerHTML = '📷 Обработка...';
 });
-
-startCamera();
 </script>
 """
 
-# Показываем камеру
-st.components.v1.html(camera_html, height=400)
+# Отображаем компонент камеры
+from streamlit.components.v1 import html
+html(camera_html, height=450)
 
-# Обработка фото из камеры
-if 'captured_image' in st.session_state:
-    image_data = st.session_state.captured_image
+# Обработка полученного изображения
+if 'scanned_image' in st.session_state:
+    image_data = st.session_state.scanned_image
     if image_data:
-        # Конвертируем base64 в изображение
-        import base64
-        image_bytes = base64.b64decode(image_data.split(',')[1])
-        image = Image.open(io.BytesIO(image_bytes))
+        st.info("🔍 Распознаем штрихкод...")
         
-        # Конвертируем PIL Image в numpy array для OpenCV
-        img_array = np.array(image)
-        
-        # Распознаем штрихкод
-        if PYZBAR_AVAILABLE:
-            decoded_objects = decode(img_array)
-            
-            if decoded_objects:
-                barcode_data = decoded_objects[0].data.decode('utf-8')
-                st.info(f"🔍 Найден штрихкод: {barcode_data}")
-                
-                # Отмечаем как отгруженный
-                if mark_as_shipped(barcode_data):
-                    st.balloons()
-                    st.rerun()
-            else:
-                st.warning("❌ Штрихкод не распознан. Попробуйте еще раз или используйте ручной ввод.")
-        else:
-            st.error("⚠️ Библиотека распознавания недоступна. Используйте ручной ввод.")
+        # Здесь нужен сервис распознавания штрихкодов
+        # Пока используем ручной ввод
+        st.warning("⚠️ Для распознавания штрихкодов нужно подключить API (например, Google Vision)")
+        st.info("💡 Используйте поле ручного ввода ниже")
 
-# --- АЛЬТЕРНАТИВНЫЙ ВАРИАНТ: РУЧНОЙ ВВОД ---
-st.header("⌨️ Ручной ввод (альтернатива)")
+# --- РУЧНОЙ ВВОД (ОСНОВНОЙ СПОСОБ) ---
+st.header("⌨️ Ввод номера накладной")
 
 col1, col2 = st.columns([3, 1])
 with col1:
-    manual_barcode = st.text_input("Введите номер накладной:", key="manual_input")
+    manual_barcode = st.text_input("Введите или отсканируйте номер накладной:", key="manual_input", placeholder="Например: INV-001")
 with col2:
-    if st.button("✅ Отгрузить"):
+    if st.button("✅ Отгрузить", type="primary"):
         if manual_barcode:
             if mark_as_shipped(manual_barcode):
                 st.rerun()
         else:
             st.warning("Введите номер накладной")
 
+# --- ПРОГРЕСС ОТГРУЗКИ ---
+st.subheader("📦 Прогресс отгрузки")
+
+progress = done / total if total > 0 else 0
+st.progress(progress, text=f"Выполнено: {done} из {total} ({int(progress*100)}%)")
+
 # --- ОСТАВШИЕСЯ НАКЛАДНЫЕ ---
-st.subheader("📦 Осталось отгрузить")
+st.subheader("📋 Осталось отгрузить")
+
 remaining = driver_df[driver_df["Статус"] != "Отгружено"]
 if not remaining.empty:
-    # Показываем только нужные колонки
-    display_cols = ["Номера накладных", "Адрес"] if "Адрес" in remaining.columns else ["Номера накладных"]
-    st.dataframe(remaining[display_cols], use_container_width=True, height=300)
+    # Выбираем колонки для отображения
+    display_cols = []
+    if "Номера накладных" in remaining.columns:
+        display_cols.append("Номера накладных")
+    if "Адрес" in remaining.columns:
+        display_cols.append("Адрес")
+    
+    if display_cols:
+        st.dataframe(remaining[display_cols], use_container_width=True, height=300)
+    else:
+        st.dataframe(remaining, use_container_width=True, height=300)
 else:
     st.success("🎉 Поздравляем! Все накладные отгружены!")
 
 # --- МАРШРУТ ---
 if "Адрес" in df.columns:
     st.subheader("🗺️ Маршрут")
-    route = driver_df[driver_df["Статус"] != "Отгружено"].groupby("Адрес").size().reset_index(name="Количество накладных")
+    route = driver_df[driver_df["Статус"] != "Отгружено"].groupby("Адрес").size().reset_index(name="Количество")
     if not route.empty:
         st.dataframe(route, use_container_width=True)
     else:
         st.info("🚚 Маршрут завершен!")
 
-# --- ПРОГРЕСС-БАР ---
-progress = done / total if total > 0 else 0
-st.progress(progress, text=f"Прогресс: {done}/{total} ({int(progress*100)}%)")
-
-# --- ОБНОВЛЕНИЕ ДАННЫХ ---
+# --- КНОПКА ОБНОВЛЕНИЯ ---
 if st.button("🔄 Обновить данные"):
     st.rerun()
+
+# --- СТАТИСТИКА ---
+st.subheader("📊 Статистика по всем машинам")
+if "Номер Машины" in df.columns:
+    all_stats = df.groupby("Номер Машины").agg({
+        "Номера накладных": "count",
+        "Статус": lambda x: (x == "Отгружено").sum()
+    }).reset_index()
+    all_stats.columns = ["Машина", "Всего", "Отгружено"]
+    all_stats["Осталось"] = all_stats["Всего"] - all_stats["Отгружено"]
+    st.dataframe(all_stats, use_container_width=True)
