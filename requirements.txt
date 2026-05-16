@@ -2,7 +2,6 @@ streamlit
 gspread
 pandas
 Pillow
-opencv-python-headless
-pyzbar
 oauth2client
-numpy
+google-auth
+google-auth-oauthlib
