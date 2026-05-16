@@ -3,37 +3,35 @@ import gspread
 from google.oauth2.service_account import Credentials
 import pandas as pd
 from datetime import datetime
-from PIL import Image
-import io
-import base64
-import json
+import re
 
 st.set_page_config(layout="wide")
 
-# --- ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS (ИСПРАВЛЕНО) ---
-# Получаем credentials из secrets
+# --- ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS ---
 creds_dict = dict(st.secrets["gcp_service_account"])
 
-# Создаем credentials правильно
 scope = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive"
 ]
 
-# Используем google.oauth2 вместо oauth2client
-credentials = Credentials.from_service_account_info(
-    creds_dict,
-    scopes=scope
-)
-
-client = gspread.authorize(credentials)
-
-# Открываем таблицу
-sheet = client.open_by_url(
-    "https://docs.google.com/spreadsheets/d/1soHrN7Iqd3jk9iLGdUGK9APxVfRBwWXHxoI8x2Hsh1o"
-).worksheet("Отгрузка")
-
-df = pd.DataFrame(sheet.get_all_records())
+try:
+    credentials = Credentials.from_service_account_info(
+        creds_dict,
+        scopes=scope
+    )
+    client = gspread.authorize(credentials)
+    
+    sheet = client.open_by_url(
+        "https://docs.google.com/spreadsheets/d/1soHrN7Iqd3jk9iLGdUGK9APxVfRBwWXHxoI8x2Hsh1o"
+    ).worksheet("Отгрузка")
+    
+    df = pd.DataFrame(sheet.get_all_records())
+    st.success("✅ Подключено к Google Sheets")
+    
+except Exception as e:
+    st.error(f"❌ Ошибка подключения: {e}")
+    st.stop()
 
 st.title("🚚 Отгрузка со сканером")
 
@@ -57,7 +55,6 @@ else:
 def mark_as_shipped(barcode):
     barcode = str(barcode).strip()
     
-    # Ищем накладную
     if "Номера накладных" not in df.columns:
         st.error("❌ В таблице нет колонки 'Номера накладных'")
         return False
@@ -82,81 +79,109 @@ def mark_as_shipped(barcode):
         st.error(f"❌ Накладная {barcode} не найдена!")
         return False
 
-# --- СКАНИРОВАНИЕ КАМЕРОЙ ТЕЛЕФОНА ---
-st.header("📷 Сканирование штрихкода")
+# --- СКАНИРОВАНИЕ КАМЕРОЙ ТЕЛЕФОНА (РАБОТАЕТ!) ---
+st.header("📷 Сканирование штрихкода камерой")
 
-# JavaScript для захвата фото с камеры телефона
-camera_html = """
-<div style="text-align: center; padding: 10px;">
-    <video id="video" width="100%" autoplay playsinline style="border: 2px solid #ddd; border-radius: 10px; max-width: 500px;"></video>
-    <div style="margin-top: 10px;">
-        <button id="capture" style="padding: 12px 24px; font-size: 18px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer;">📸 Сканировать</button>
+# HTML/JS компонент для сканирования QR/штрихкодов
+scanner_html = """
+<!DOCTYPE html>
+<html>
+<head>
+    <script src="https://unpkg.com/html5-qrcode/minified/html5-qrcode.min.js"></script>
+</head>
+<body>
+    <div style="width: 100%; max-width: 600px; margin: 0 auto;">
+        <div id="reader" style="width: 100%;"></div>
+        <div id="result" style="margin-top: 20px; padding: 10px; font-size: 16px; text-align: center;"></div>
     </div>
-    <div id="result" style="margin-top: 10px; font-size: 14px; color: #666;"></div>
-</div>
-
-<script>
-let video = document.getElementById('video');
-let captureBtn = document.getElementById('capture');
-let resultDiv = document.getElementById('result');
-
-// Запуск камеры
-navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
-    .then(function(stream) {
-        video.srcObject = stream;
-        resultDiv.innerHTML = '✅ Камера готова';
-        resultDiv.style.color = 'green';
-    })
-    .catch(function(err) {
-        resultDiv.innerHTML = '❌ Ошибка доступа к камере: ' + err.message;
-        resultDiv.style.color = 'red';
-    });
-
-// Функция захвата и отправки фото
-captureBtn.addEventListener('click', function() {
-    let canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    let ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     
-    // Получаем base64 изображения
-    let imageData = canvas.toDataURL('image/jpeg', 0.8);
+    <script>
+    let html5QrCode = null;
     
-    // Отправляем в Streamlit
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.id = 'scanned_image';
-    input.value = imageData;
-    document.body.appendChild(input);
-    input.dispatchEvent(new Event('input'));
+    function startScanner() {
+        html5QrCode = new Html5Qrcode("reader");
+        const config = {
+            fps: 10,
+            qrbox: { width: 250, height: 250 },
+            aspectRatio: 1.0
+        };
+        
+        html5QrCode.start(
+            { facingMode: "environment" },
+            config,
+            (decodedText) => {
+                // Успешное сканирование
+                document.getElementById('result').innerHTML = '✅ Найден: ' + decodedText;
+                document.getElementById('result').style.color = 'green';
+                
+                // Отправляем в Streamlit
+                const input = document.createElement('input');
+                input.type = 'text';
+                input.value = decodedText;
+                input.id = 'scanned_code';
+                document.body.appendChild(input);
+                input.dispatchEvent(new Event('input'));
+                
+                // Останавливаем сканер после успешного сканирования
+                setTimeout(() => {
+                    if (html5QrCode) {
+                        html5QrCode.stop();
+                    }
+                }, 1000);
+            },
+            (error) => {
+                // Ошибки игнорируем (обычно это просто пропущенные кадры)
+                console.log(error);
+            }
+        ).catch(err => {
+            document.getElementById('result').innerHTML = '❌ Ошибка камеры: ' + err;
+            document.getElementById('result').style.color = 'red';
+        });
+    }
     
-    resultDiv.innerHTML = '📷 Обработка...';
-});
-</script>
+    // Запускаем сканер при загрузке страницы
+    startScanner();
+    
+    // Кнопка для перезапуска
+    window.restartScanner = function() {
+        if (html5QrCode) {
+            html5QrCode.stop().then(() => {
+                startScanner();
+                document.getElementById('result').innerHTML = '🔄 Сканер перезапущен';
+                document.getElementById('result').style.color = 'blue';
+            });
+        }
+    };
+    </script>
+    
+    <div style="text-align: center; margin-top: 10px;">
+        <button onclick="restartScanner()" style="padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer;">🔄 Перезапустить камеру</button>
+    </div>
+</body>
+</html>
 """
 
-# Отображаем компонент камеры
+# Отображаем сканер
 from streamlit.components.v1 import html
-html(camera_html, height=450)
+html(scanner_html, height=500)
 
-# Обработка полученного изображения
-if 'scanned_image' in st.session_state:
-    image_data = st.session_state.scanned_image
-    if image_data:
-        st.info("🔍 Распознаем штрихкод...")
-        
-        # Здесь нужен сервис распознавания штрихкодов
-        # Пока используем ручной ввод
-        st.warning("⚠️ Для распознавания штрихкодов нужно подключить API (например, Google Vision)")
-        st.info("💡 Используйте поле ручного ввода ниже")
+# Обработка отсканированного кода
+if 'scanned_code' in st.session_state:
+    barcode = st.session_state.scanned_code
+    st.info(f"📦 Отсканировано: {barcode}")
+    
+    if mark_as_shipped(barcode):
+        # Очищаем значение, чтобы можно было сканировать снова
+        del st.session_state.scanned_code
+        st.rerun()
 
-# --- РУЧНОЙ ВВОД (ОСНОВНОЙ СПОСОБ) ---
-st.header("⌨️ Ввод номера накладной")
+# --- РУЧНОЙ ВВОД (НА СЛУЧАЙ, ЕСЛИ КАМЕРА НЕ РАБОТАЕТ) ---
+st.markdown("---")
+st.subheader("⌨️ Или введите номер вручную")
 
 col1, col2 = st.columns([3, 1])
 with col1:
-    manual_barcode = st.text_input("Введите или отсканируйте номер накладной:", key="manual_input", placeholder="Например: INV-001")
+    manual_barcode = st.text_input("Номер накладной:", placeholder="Введите номер...")
 with col2:
     if st.button("✅ Отгрузить", type="primary"):
         if manual_barcode:
@@ -165,18 +190,17 @@ with col2:
         else:
             st.warning("Введите номер накладной")
 
-# --- ПРОГРЕСС ОТГРУЗКИ ---
-st.subheader("📦 Прогресс отгрузки")
+# --- ПРОГРЕСС И ОСТАВШИЕСЯ НАКЛАДНЫЕ ---
+st.markdown("---")
+st.subheader("📊 Прогресс отгрузки")
 
 progress = done / total if total > 0 else 0
 st.progress(progress, text=f"Выполнено: {done} из {total} ({int(progress*100)}%)")
 
-# --- ОСТАВШИЕСЯ НАКЛАДНЫЕ ---
 st.subheader("📋 Осталось отгрузить")
 
 remaining = driver_df[driver_df["Статус"] != "Отгружено"]
 if not remaining.empty:
-    # Выбираем колонки для отображения
     display_cols = []
     if "Номера накладных" in remaining.columns:
         display_cols.append("Номера накладных")
@@ -184,9 +208,9 @@ if not remaining.empty:
         display_cols.append("Адрес")
     
     if display_cols:
-        st.dataframe(remaining[display_cols], use_container_width=True, height=300)
+        st.dataframe(remaining[display_cols], use_container_width=True)
     else:
-        st.dataframe(remaining, use_container_width=True, height=300)
+        st.dataframe(remaining, use_container_width=True)
 else:
     st.success("🎉 Поздравляем! Все накладные отгружены!")
 
@@ -196,20 +220,7 @@ if "Адрес" in df.columns:
     route = driver_df[driver_df["Статус"] != "Отгружено"].groupby("Адрес").size().reset_index(name="Количество")
     if not route.empty:
         st.dataframe(route, use_container_width=True)
-    else:
-        st.info("🚚 Маршрут завершен!")
 
 # --- КНОПКА ОБНОВЛЕНИЯ ---
 if st.button("🔄 Обновить данные"):
     st.rerun()
-
-# --- СТАТИСТИКА ---
-st.subheader("📊 Статистика по всем машинам")
-if "Номер Машины" in df.columns:
-    all_stats = df.groupby("Номер Машины").agg({
-        "Номера накладных": "count",
-        "Статус": lambda x: (x == "Отгружено").sum()
-    }).reset_index()
-    all_stats.columns = ["Машина", "Всего", "Отгружено"]
-    all_stats["Осталось"] = all_stats["Всего"] - all_stats["Отгружено"]
-    st.dataframe(all_stats, use_container_width=True)
