@@ -5,19 +5,20 @@ import pandas as pd
 from datetime import datetime
 from PIL import Image
 import io
-import re
+import cv2
+import numpy as np
 
-# Альтернатива для pyzbar - используем простой OCR или ручной ввод
+# Пытаемся импортировать pyzbar с обработкой ошибок
 try:
     from pyzbar.pyzbar import decode
     PYZBAR_AVAILABLE = True
-except ImportError:
+except Exception as e:
     PYZBAR_AVAILABLE = False
-    st.warning("⚠️ Автоматическое распознавание штрихкодов недоступно. Используйте ручной ввод.")
+    st.warning(f"⚠️ Библиотека распознавания не загружена. Будет использован ручной ввод.")
 
 st.set_page_config(layout="wide")
 
-# --- GOOGLE ---
+# --- GOOGLE SHEETS ---
 creds_dict = st.secrets["gcp_service_account"]
 
 scope = [
@@ -34,119 +35,172 @@ sheet = client.open_by_url(
 
 df = pd.DataFrame(sheet.get_all_records())
 
-st.title("🚚 Отгрузка")
+st.title("🚚 Отгрузка со сканером")
 
-# --- водитель ---
-driver = st.selectbox("Машина", df["Номер Машины"].dropna().unique())
+# --- выбор водителя ---
+driver = st.selectbox("🚛 Выберите машину", df["Номер Машины"].dropna().unique())
 driver_df = df[df["Номер Машины"] == driver]
 
 total = len(driver_df)
 done = len(driver_df[driver_df["Статус"] == "Отгружено"])
 
 col1, col2, col3 = st.columns(3)
-col1.metric("Всего", total)
-col2.metric("Отгружено", done)
-col3.metric("Осталось", total - done)
+col1.metric("📦 Всего", total)
+col2.metric("✅ Отгружено", done)
+col3.metric("⏳ Осталось", total - done)
 
-# --- звук (альтернативный способ) ---
-st.markdown("""
-<script>
-function playSound() {
-    var audio = new Audio('https://www.soundjay.com/buttons/sounds/button-3.mp3');
-    audio.play();
-}
-</script>
-""", unsafe_allow_html=True)
-
-# --- функция маркировки ---
-def mark(barcode):
-    # Очищаем штрихкод от лишних символов
+# --- функция для отметки отгрузки ---
+def mark_as_shipped(barcode):
+    # Очищаем штрихкод
     barcode = str(barcode).strip()
     
-    # Ищем совпадение
+    # Ищем накладную
     match = df[df["Номера накладных"].astype(str).str.strip() == barcode]
-
+    
     if not match.empty:
         row = match.index[0] + 2
-        status = sheet.acell(f"D{row}").value
-
-        if status == "Отгружено":
-            st.warning(f"⚠️ Уже отгружено: {barcode}")
+        current_status = sheet.acell(f"D{row}").value
+        
+        if current_status == "Отгружено":
+            st.warning(f"⚠️ Накладная {barcode} уже отгружена!")
+            return False
         else:
+            # Обновляем статус
             sheet.update(f"D{row}", "Отгружено")
-            sheet.update(f"E{row}", f"{driver} | {datetime.now()}")
-
-            st.success(f"✅ Отгружено: {barcode}")
-            # Вызываем звук через JS
-            st.markdown("<script>playSound()</script>", unsafe_allow_html=True)
-            st.rerun()
+            sheet.update(f"E{row}", f"{driver} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            st.success(f"✅ Накладная {barcode} отгружена!")
+            return True
     else:
-        st.error(f"❌ Не найден: {barcode}")
+        st.error(f"❌ Накладная {barcode} не найдена!")
+        return False
 
-# --- ручной ввод (работает всегда) ---
-st.subheader("⌨️ Ручной ввод")
-barcode_input = st.text_input("Введите номер накладной или отсканируйте штрихкод:", key="barcode_input")
-if barcode_input:
-    mark(barcode_input)
-    st.session_state.barcode_input = ""  # Очищаем поле
-    st.rerun()
+# --- СКАНИРОВАНИЕ КАМЕРОЙ ---
+st.header("📷 Сканирование штрихкода камерой")
 
-# --- камера (если доступна библиотека) ---
-if PYZBAR_AVAILABLE:
-    st.subheader("📷 Сканирование камерой")
-    img_file = st.camera_input("Наведите на штрихкод")
+# Используем HTML5 камеру через JavaScript (работает на телефонах)
+camera_html = """
+<div style="text-align: center; padding: 20px;">
+    <video id="video" width="100%" height="auto" autoplay playsinline style="border: 2px solid #ccc; border-radius: 10px;"></video>
+    <canvas id="canvas" style="display: none;"></canvas>
+    <div style="margin-top: 10px;">
+        <button id="capture" style="padding: 10px 20px; font-size: 18px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer;">📸 Сделать фото</button>
+    </div>
+    <div id="result" style="margin-top: 10px; font-size: 16px;"></div>
+</div>
 
-    if img_file is not None:
-        image = Image.open(img_file)
-        decoded = decode(image)
+<script>
+let video = document.getElementById('video');
+let canvas = document.getElementById('canvas');
+let captureBtn = document.getElementById('capture');
+let resultDiv = document.getElementById('result');
 
-        if decoded:
-            barcode = decoded[0].data.decode("utf-8")
-            st.write(f"Найден штрихкод: {barcode}")
-            mark(barcode)
+// Запуск камеры
+async function startCamera() {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        video.srcObject = stream;
+    } catch(err) {
+        resultDiv.innerHTML = '❌ Ошибка доступа к камере: ' + err.message;
+        resultDiv.style.color = 'red';
+    }
+}
+
+// Захват фото
+captureBtn.addEventListener('click', () => {
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    
+    // Конвертируем в base64
+    let imageData = canvas.toDataURL('image/jpeg', 0.8);
+    
+    // Отправляем в Streamlit
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.id = 'captured_image';
+    input.value = imageData;
+    document.body.appendChild(input);
+    
+    // Обновляем Streamlit
+    const event = new Event('input');
+    input.dispatchEvent(event);
+    
+    resultDiv.innerHTML = '📷 Фото сделано! Обработка...';
+});
+
+startCamera();
+</script>
+"""
+
+# Показываем камеру
+st.components.v1.html(camera_html, height=400)
+
+# Обработка фото из камеры
+if 'captured_image' in st.session_state:
+    image_data = st.session_state.captured_image
+    if image_data:
+        # Конвертируем base64 в изображение
+        import base64
+        image_bytes = base64.b64decode(image_data.split(',')[1])
+        image = Image.open(io.BytesIO(image_bytes))
+        
+        # Конвертируем PIL Image в numpy array для OpenCV
+        img_array = np.array(image)
+        
+        # Распознаем штрихкод
+        if PYZBAR_AVAILABLE:
+            decoded_objects = decode(img_array)
+            
+            if decoded_objects:
+                barcode_data = decoded_objects[0].data.decode('utf-8')
+                st.info(f"🔍 Найден штрихкод: {barcode_data}")
+                
+                # Отмечаем как отгруженный
+                if mark_as_shipped(barcode_data):
+                    st.balloons()
+                    st.rerun()
+            else:
+                st.warning("❌ Штрихкод не распознан. Попробуйте еще раз или используйте ручной ввод.")
         else:
-            st.warning("Штрихкод не распознан. Используйте ручной ввод.")
-else:
-    st.info("💡 Для сканирования камерой установите библиотеки: \n```\npip install pyzbar opencv-python-headless\n```\nПока используйте ручной ввод.")
+            st.error("⚠️ Библиотека распознавания недоступна. Используйте ручной ввод.")
 
-# --- остатки ---
+# --- АЛЬТЕРНАТИВНЫЙ ВАРИАНТ: РУЧНОЙ ВВОД ---
+st.header("⌨️ Ручной ввод (альтернатива)")
+
+col1, col2 = st.columns([3, 1])
+with col1:
+    manual_barcode = st.text_input("Введите номер накладной:", key="manual_input")
+with col2:
+    if st.button("✅ Отгрузить"):
+        if manual_barcode:
+            if mark_as_shipped(manual_barcode):
+                st.rerun()
+        else:
+            st.warning("Введите номер накладной")
+
+# --- ОСТАВШИЕСЯ НАКЛАДНЫЕ ---
 st.subheader("📦 Осталось отгрузить")
-remaining_df = driver_df[driver_df["Статус"] != "Отгружено"]
-if not remaining_df.empty:
-    st.dataframe(remaining_df[["Номера накладных", "Адрес"]], use_container_width=True)
+remaining = driver_df[driver_df["Статус"] != "Отгружено"]
+if not remaining.empty:
+    # Показываем только нужные колонки
+    display_cols = ["Номера накладных", "Адрес"] if "Адрес" in remaining.columns else ["Номера накладных"]
+    st.dataframe(remaining[display_cols], use_container_width=True, height=300)
 else:
-    st.success("🎉 Все накладные отгружены!")
+    st.success("🎉 Поздравляем! Все накладные отгружены!")
 
-# --- маршрут ---
+# --- МАРШРУТ ---
 if "Адрес" in df.columns:
-    st.subheader("🚚 Маршрут")
-    route = driver_df[driver_df["Статус"] != "Отгружено"].groupby("Адрес").size().reset_index(name="Кол-во")
+    st.subheader("🗺️ Маршрут")
+    route = driver_df[driver_df["Статус"] != "Отгружено"].groupby("Адрес").size().reset_index(name="Количество накладных")
     if not route.empty:
         st.dataframe(route, use_container_width=True)
     else:
-        st.info("Маршрут завершён")
+        st.info("🚚 Маршрут завершен!")
 
-# --- отчёт по машине ---
-st.subheader("📊 Отчёт по машине")
+# --- ПРОГРЕСС-БАР ---
+progress = done / total if total > 0 else 0
+st.progress(progress, text=f"Прогресс: {done}/{total} ({int(progress*100)}%)")
 
-# Получаем все машины для отчёта
-all_trucks = df.groupby("Номер Машины").agg({
-    "Номера накладных": "count",
-    "Статус": lambda x: (x == "Отгружено").sum()
-}).reset_index()
-
-all_trucks.columns = ["Машина", "Всего", "Отгружено"]
-all_trucks["Осталось"] = all_trucks["Всего"] - all_trucks["Отгружено"]
-
-st.dataframe(all_trucks, use_container_width=True)
-
-# --- экспорт отчёта ---
-if st.button("📥 Скачать отчёт"):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv = all_trucks.to_csv(index=False)
-    st.download_button(
-        label="💾 Скачать CSV",
-        data=csv,
-        file_name=f"otgruzka_report_{timestamp}.csv",
-        mime="text/csv"
-    )
+# --- ОБНОВЛЕНИЕ ДАННЫХ ---
+if st.button("🔄 Обновить данные"):
+    st.rerun()
