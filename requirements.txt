@@ -1,8 +1,7 @@
 streamlit
 gspread
-oauth2client
 pandas
-streamlit-webrtc
+Pillow
 opencv-python-headless
 pyzbar
-av
+oauth2client
