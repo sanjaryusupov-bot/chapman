@@ -3,7 +3,6 @@ import gspread
 from google.oauth2.service_account import Credentials
 import pandas as pd
 from datetime import datetime
-import re
 
 st.set_page_config(layout="wide")
 
@@ -51,7 +50,7 @@ else:
     st.error("❌ В таблице нет колонки 'Номер Машины'")
     st.stop()
 
-# --- ФУНКЦИЯ ОТМЕТКИ ОТГРУЗКИ ---
+# --- ФУНКЦИЯ ОТМЕТКИ ---
 def mark_as_shipped(barcode):
     barcode = str(barcode).strip()
     
@@ -69,7 +68,6 @@ def mark_as_shipped(barcode):
             st.warning(f"⚠️ Накладная {barcode} уже отгружена!")
             return False
         else:
-            # Обновляем статус
             sheet.update(f"D{row}", "Отгружено")
             sheet.update(f"E{row}", f"{driver} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             st.success(f"✅ Накладная {barcode} отгружена!")
@@ -79,103 +77,45 @@ def mark_as_shipped(barcode):
         st.error(f"❌ Накладная {barcode} не найдена!")
         return False
 
-# --- СКАНИРОВАНИЕ КАМЕРОЙ ТЕЛЕФОНА (РАБОТАЕТ!) ---
-st.header("📷 Сканирование штрихкода камерой")
+# --- СКАНИРОВАНИЕ КАМЕРОЙ ---
+st.header("📷 Сканирование QR-кода камерой")
 
-# HTML/JS компонент для сканирования QR/штрихкодов
 scanner_html = """
-<!DOCTYPE html>
-<html>
-<head>
-    <script src="https://unpkg.com/html5-qrcode/minified/html5-qrcode.min.js"></script>
-</head>
-<body>
-    <div style="width: 100%; max-width: 600px; margin: 0 auto;">
-        <div id="reader" style="width: 100%;"></div>
-        <div id="result" style="margin-top: 20px; padding: 10px; font-size: 16px; text-align: center;"></div>
-    </div>
-    
-    <script>
-    let html5QrCode = null;
-    
-    function startScanner() {
-        html5QrCode = new Html5Qrcode("reader");
-        const config = {
-            fps: 10,
-            qrbox: { width: 250, height: 250 },
-            aspectRatio: 1.0
-        };
-        
-        html5QrCode.start(
-            { facingMode: "environment" },
-            config,
-            (decodedText) => {
-                // Успешное сканирование
-                document.getElementById('result').innerHTML = '✅ Найден: ' + decodedText;
-                document.getElementById('result').style.color = 'green';
-                
-                // Отправляем в Streamlit
-                const input = document.createElement('input');
-                input.type = 'text';
-                input.value = decodedText;
-                input.id = 'scanned_code';
-                document.body.appendChild(input);
-                input.dispatchEvent(new Event('input'));
-                
-                // Останавливаем сканер после успешного сканирования
-                setTimeout(() => {
-                    if (html5QrCode) {
-                        html5QrCode.stop();
-                    }
-                }, 1000);
-            },
-            (error) => {
-                // Ошибки игнорируем (обычно это просто пропущенные кадры)
-                console.log(error);
-            }
-        ).catch(err => {
-            document.getElementById('result').innerHTML = '❌ Ошибка камеры: ' + err;
-            document.getElementById('result').style.color = 'red';
-        });
-    }
-    
-    // Запускаем сканер при загрузке страницы
-    startScanner();
-    
-    // Кнопка для перезапуска
-    window.restartScanner = function() {
-        if (html5QrCode) {
-            html5QrCode.stop().then(() => {
-                startScanner();
-                document.getElementById('result').innerHTML = '🔄 Сканер перезапущен';
-                document.getElementById('result').style.color = 'blue';
-            });
-        }
-    };
-    </script>
-    
-    <div style="text-align: center; margin-top: 10px;">
-        <button onclick="restartScanner()" style="padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer;">🔄 Перезапустить камеру</button>
-    </div>
-</body>
-</html>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/minified/html5-qrcode.min.js"></script>
+<div id="reader" style="width: 100%; max-width: 500px; margin: 0 auto;"></div>
+<div id="result" style="margin-top: 10px; text-align: center;"></div>
+<script>
+const html5QrCode = new Html5Qrcode("reader");
+html5QrCode.start(
+    { facingMode: "environment" },
+    { fps: 10, qrbox: 250 },
+    (decodedText) => {
+        document.getElementById('result').innerHTML = '✅ Отсканировано: ' + decodedText;
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = decodedText;
+        input.id = 'qr_result';
+        document.body.appendChild(input);
+        input.dispatchEvent(new Event('input'));
+        html5QrCode.stop();
+    },
+    (error) => {}
+).catch(err => {
+    document.getElementById('result').innerHTML = '❌ Ошибка: ' + err;
+});
+</script>
 """
 
-# Отображаем сканер
 from streamlit.components.v1 import html
-html(scanner_html, height=500)
+html(scanner_html, height=400)
 
-# Обработка отсканированного кода
-if 'scanned_code' in st.session_state:
-    barcode = st.session_state.scanned_code
+if 'qr_result' in st.session_state:
+    barcode = st.session_state.qr_result
     st.info(f"📦 Отсканировано: {barcode}")
-    
     if mark_as_shipped(barcode):
-        # Очищаем значение, чтобы можно было сканировать снова
-        del st.session_state.scanned_code
         st.rerun()
 
-# --- РУЧНОЙ ВВОД (НА СЛУЧАЙ, ЕСЛИ КАМЕРА НЕ РАБОТАЕТ) ---
+# --- РУЧНОЙ ВВОД ---
 st.markdown("---")
 st.subheader("⌨️ Или введите номер вручную")
 
@@ -187,40 +127,16 @@ with col2:
         if manual_barcode:
             if mark_as_shipped(manual_barcode):
                 st.rerun()
-        else:
-            st.warning("Введите номер накладной")
 
-# --- ПРОГРЕСС И ОСТАВШИЕСЯ НАКЛАДНЫЕ ---
+# --- ПРОГРЕСС ---
 st.markdown("---")
-st.subheader("📊 Прогресс отгрузки")
-
 progress = done / total if total > 0 else 0
 st.progress(progress, text=f"Выполнено: {done} из {total} ({int(progress*100)}%)")
 
 st.subheader("📋 Осталось отгрузить")
-
 remaining = driver_df[driver_df["Статус"] != "Отгружено"]
 if not remaining.empty:
-    display_cols = []
-    if "Номера накладных" in remaining.columns:
-        display_cols.append("Номера накладных")
-    if "Адрес" in remaining.columns:
-        display_cols.append("Адрес")
-    
-    if display_cols:
-        st.dataframe(remaining[display_cols], use_container_width=True)
-    else:
-        st.dataframe(remaining, use_container_width=True)
+    display_cols = [c for c in ["Номера накладных", "Адрес"] if c in remaining.columns]
+    st.dataframe(remaining[display_cols], use_container_width=True)
 else:
-    st.success("🎉 Поздравляем! Все накладные отгружены!")
-
-# --- МАРШРУТ ---
-if "Адрес" in df.columns:
-    st.subheader("🗺️ Маршрут")
-    route = driver_df[driver_df["Статус"] != "Отгружено"].groupby("Адрес").size().reset_index(name="Количество")
-    if not route.empty:
-        st.dataframe(route, use_container_width=True)
-
-# --- КНОПКА ОБНОВЛЕНИЯ ---
-if st.button("🔄 Обновить данные"):
-    st.rerun()
+    st.success("🎉 Все накладные отгружены!")
