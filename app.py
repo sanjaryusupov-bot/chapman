@@ -50,7 +50,7 @@ else:
     st.error("❌ В таблице нет колонки 'Номер Машины'")
     st.stop()
 
-# --- ФУНКЦИЯ ОТМЕТКИ ОТГРУЗКИ ---
+# --- ФУНКЦИЯ ОТМЕТКИ ---
 def mark_as_shipped(barcode):
     barcode = str(barcode).strip()
     
@@ -77,99 +77,61 @@ def mark_as_shipped(barcode):
         st.error(f"❌ Накладная {barcode} не найдена!")
         return False
 
-# --- СКАНИРОВАНИЕ КАМЕРОЙ (РАБОТАЕТ НА ТЕЛЕФОНЕ) ---
-st.header("📷 Сканируйте QR-код камерой")
+# --- СКАНИРОВАНИЕ КАМЕРОЙ ---
+st.header("📷 Сканируйте QR-код")
 
 scanner_html = """
 <div style="text-align: center;">
-    <div id="qr-reader" style="width: 100%; max-width: 500px; margin: 0 auto;"></div>
-    <div id="qr-status" style="margin-top: 10px; font-size: 14px;"></div>
+    <div id="reader" style="width: 100%; max-width: 500px; margin: 0 auto;"></div>
+    <div id="result" style="margin-top: 10px;"></div>
 </div>
-
-<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/minified/html5-qrcode.min.js"></script>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/minified/html5-qrcode.min.js"></script>
 <script>
-const scanner = new Html5Qrcode("qr-reader");
-scanner.start(
+const html5QrCode = new Html5Qrcode("reader");
+html5QrCode.start(
     { facingMode: "environment" },
-    { fps: 10, qrbox: { width: 250, height: 250 } },
+    { fps: 10, qrbox: 250 },
     (decodedText) => {
-        document.getElementById('qr-status').innerHTML = '✅ Отсканировано: ' + decodedText;
-        document.getElementById('qr-status').style.color = 'green';
-        
+        document.getElementById('result').innerHTML = '✅ Найдено: ' + decodedText;
         const input = document.createElement('input');
         input.type = 'text';
         input.value = decodedText;
-        input.id = 'scanned_code';
+        input.id = 'qr_scanned';
         document.body.appendChild(input);
         input.dispatchEvent(new Event('input'));
-        
-        scanner.stop();
+        html5QrCode.stop();
     },
-    (error) => {
-        // Игнорируем ошибки сканирования
-    }
+    (error) => {}
 ).catch(err => {
-    document.getElementById('qr-status').innerHTML = '❌ Ошибка: ' + err;
-    document.getElementById('qr-status').style.color = 'red';
+    document.getElementById('result').innerHTML = '❌ Ошибка: ' + err;
 });
 </script>
 """
 
 from streamlit.components.v1 import html
-html(scanner_html, height=450)
+html(scanner_html, height=400)
 
-# Обработка отсканированного кода
-if 'scanned_code' in st.session_state:
-    barcode = st.session_state.scanned_code
+if 'qr_scanned' in st.session_state:
+    barcode = st.session_state.qr_scanned
     if mark_as_shipped(barcode):
-        # Очищаем и перезагружаем
-        del st.session_state.scanned_code
         st.rerun()
 
-# --- РУЧНОЙ ВВОД (ЗАПАСНОЙ ВАРИАНТ) ---
+# --- РУЧНОЙ ВВОД ---
 st.markdown("---")
-st.subheader("⌨️ Или введите номер вручную")
+st.subheader("⌨️ Ручной ввод")
 
-col1, col2, st.colums([3, 1])
-with col1:
-    manual_barcode = st.text_input("Номер накладной:", placeholder="Введите номер...", key="manual_input")
-with col2:
-    if st.button("✅ Отгрузить", type="primary"):
-        if manual_barcode:
-            if mark_as_shipped(manual_barcode):
-                st.rerun()
+manual_barcode = st.text_input("Номер накладной:")
+if st.button("Отгрузить") and manual_barcode:
+    mark_as_shipped(manual_barcode)
 
-# --- ПРОГРЕСС И ОСТАВШИЕСЯ ---
+# --- ПРОГРЕСС ---
 st.markdown("---")
-st.subheader("📊 Прогресс отгрузки")
-
 progress = done / total if total > 0 else 0
-st.progress(progress, text=f"{done} из {total} отгружено ({int(progress*100)}%)")
+st.progress(progress, text=f"{done} из {total} ({int(progress*100)}%)")
 
-st.subheader("📋 Осталось отгрузить")
-
+st.subheader("📋 Осталось")
 remaining = driver_df[driver_df["Статус"] != "Отгружено"]
 if not remaining.empty:
-    display_cols = []
-    if "Номера накладных" in remaining.columns:
-        display_cols.append("Номера накладных")
-    if "Адрес" in remaining.columns:
-        display_cols.append("Адрес")
-    
-    if display_cols:
-        st.dataframe(remaining[display_cols], use_container_width=True, height=300)
-    else:
-        st.dataframe(remaining, use_container_width=True, height=300)
+    st.dataframe(remaining[["Номера накладных", "Адрес"]], use_container_width=True)
 else:
-    st.success("🎉 Поздравляем! Все накладные отгружены!")
-
-# --- МАРШРУТ ---
-if "Адрес" in df.columns:
-    st.subheader("🗺️ Маршрут")
-    route = driver_df[driver_df["Статус"] != "Отгружено"].groupby("Адрес").size().reset_index(name="Количество")
-    if not route.empty:
-        st.dataframe(route, use_container_width=True)
-
-# --- КНОПКА ОБНОВЛЕНИЯ ---
-if st.button("🔄 Обновить данные"):
-    st.rerun()
+    st.success("✅ Все отгружено!")
