@@ -4,7 +4,16 @@ from oauth2client.service_account import ServiceAccountCredentials
 import pandas as pd
 from datetime import datetime
 from PIL import Image
-from pyzbar.pyzbar import decode
+import io
+import re
+
+# Альтернатива для pyzbar - используем простой OCR или ручной ввод
+try:
+    from pyzbar.pyzbar import decode
+    PYZBAR_AVAILABLE = True
+except ImportError:
+    PYZBAR_AVAILABLE = False
+    st.warning("⚠️ Автоматическое распознавание штрихкодов недоступно. Используйте ручной ввод.")
 
 st.set_page_config(layout="wide")
 
@@ -25,7 +34,7 @@ sheet = client.open_by_url(
 
 df = pd.DataFrame(sheet.get_all_records())
 
-st.title("🚚 Отгрузка (камера)")
+st.title("🚚 Отгрузка")
 
 # --- водитель ---
 driver = st.selectbox("Машина", df["Номер Машины"].dropna().unique())
@@ -39,68 +48,105 @@ col1.metric("Всего", total)
 col2.metric("Отгружено", done)
 col3.metric("Осталось", total - done)
 
-# --- звук ---
+# --- звук (альтернативный способ) ---
 st.markdown("""
-<audio id="ok" src="https://www.soundjay.com/buttons/sounds/button-3.mp3"></audio>
 <script>
-function ok(){document.getElementById("ok").play();}
+function playSound() {
+    var audio = new Audio('https://www.soundjay.com/buttons/sounds/button-3.mp3');
+    audio.play();
+}
 </script>
 """, unsafe_allow_html=True)
 
-# --- функция ---
+# --- функция маркировки ---
 def mark(barcode):
-    match = df[df["Номера накладных"].astype(str) == barcode]
+    # Очищаем штрихкод от лишних символов
+    barcode = str(barcode).strip()
+    
+    # Ищем совпадение
+    match = df[df["Номера накладных"].astype(str).str.strip() == barcode]
 
     if not match.empty:
         row = match.index[0] + 2
         status = sheet.acell(f"D{row}").value
 
         if status == "Отгружено":
-            st.warning(f"⚠️ Уже: {barcode}")
+            st.warning(f"⚠️ Уже отгружено: {barcode}")
         else:
             sheet.update(f"D{row}", "Отгружено")
             sheet.update(f"E{row}", f"{driver} | {datetime.now()}")
 
-            st.success(f"✅ {barcode}")
-            st.markdown("<script>ok()</script>", unsafe_allow_html=True)
+            st.success(f"✅ Отгружено: {barcode}")
+            # Вызываем звук через JS
+            st.markdown("<script>playSound()</script>", unsafe_allow_html=True)
+            st.rerun()
     else:
-        st.error(f"❌ Нет: {barcode}")
+        st.error(f"❌ Не найден: {barcode}")
 
-# --- камера ---
-st.subheader("📷 Сканируй")
+# --- ручной ввод (работает всегда) ---
+st.subheader("⌨️ Ручной ввод")
+barcode_input = st.text_input("Введите номер накладной или отсканируйте штрихкод:", key="barcode_input")
+if barcode_input:
+    mark(barcode_input)
+    st.session_state.barcode_input = ""  # Очищаем поле
+    st.rerun()
 
-img_file = st.camera_input("Наведи на штрихкод")
+# --- камера (если доступна библиотека) ---
+if PYZBAR_AVAILABLE:
+    st.subheader("📷 Сканирование камерой")
+    img_file = st.camera_input("Наведите на штрихкод")
 
-if img_file is not None:
-    image = Image.open(img_file)
-    decoded = decode(image)
+    if img_file is not None:
+        image = Image.open(img_file)
+        decoded = decode(image)
 
-    if decoded:
-        barcode = decoded[0].data.decode("utf-8")
-        st.write(f"Найден: {barcode}")
-        mark(barcode)
-    else:
-        st.warning("Не удалось считать")
+        if decoded:
+            barcode = decoded[0].data.decode("utf-8")
+            st.write(f"Найден штрихкод: {barcode}")
+            mark(barcode)
+        else:
+            st.warning("Штрихкод не распознан. Используйте ручной ввод.")
+else:
+    st.info("💡 Для сканирования камерой установите библиотеки: \n```\npip install pyzbar opencv-python-headless\n```\nПока используйте ручной ввод.")
 
 # --- остатки ---
-st.subheader("📦 Осталось")
-st.dataframe(driver_df[driver_df["Статус"] != "Отгружено"])
+st.subheader("📦 Осталось отгрузить")
+remaining_df = driver_df[driver_df["Статус"] != "Отгружено"]
+if not remaining_df.empty:
+    st.dataframe(remaining_df[["Номера накладных", "Адрес"]], use_container_width=True)
+else:
+    st.success("🎉 Все накладные отгружены!")
 
 # --- маршрут ---
 if "Адрес" in df.columns:
     st.subheader("🚚 Маршрут")
     route = driver_df[driver_df["Статус"] != "Отгружено"].groupby("Адрес").size().reset_index(name="Кол-во")
-    st.dataframe(route)
+    if not route.empty:
+        st.dataframe(route, use_container_width=True)
+    else:
+        st.info("Маршрут завершён")
 
-# --- отчёт ---
-st.subheader("📊 Отчёт")
+# --- отчёт по машине ---
+st.subheader("📊 Отчёт по машине")
 
-report = pd.DataFrame({
-    "Машина": [driver],
-    "Всего": [total],
-    "Отгружено": [done],
-    "Осталось": [total - done],
-    "Дата": [datetime.now()]
-})
+# Получаем все машины для отчёта
+all_trucks = df.groupby("Номер Машины").agg({
+    "Номера накладных": "count",
+    "Статус": lambda x: (x == "Отгружено").sum()
+}).reset_index()
 
-st.dataframe(report)
+all_trucks.columns = ["Машина", "Всего", "Отгружено"]
+all_trucks["Осталось"] = all_trucks["Всего"] - all_trucks["Отгружено"]
+
+st.dataframe(all_trucks, use_container_width=True)
+
+# --- экспорт отчёта ---
+if st.button("📥 Скачать отчёт"):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv = all_trucks.to_csv(index=False)
+    st.download_button(
+        label="💾 Скачать CSV",
+        data=csv,
+        file_name=f"otgruzka_report_{timestamp}.csv",
+        mime="text/csv"
+    )
